@@ -1,7 +1,7 @@
-"""Endpoint czatu — oparty na API Anthropic Claude."""
+"""Endpoint czatu — oparty na API Google Gemini."""
 
-import anthropic
 from flask import Blueprint, current_app, jsonify, request
+from google.genai import errors
 
 from app.claude import generate_reply
 
@@ -19,12 +19,17 @@ def chat():
 
     try:
         reply = generate_reply(message, history)
-    except anthropic.AuthenticationError:
-        return jsonify(error="Błąd uwierzytelniania API Claude — sprawdź ANTHROPIC_API_KEY"), 502
-    except anthropic.RateLimitError:
-        return jsonify(error="Przekroczono limit zapytań API Claude — spróbuj ponownie za chwilę"), 429
-    except anthropic.APIError as exc:
-        current_app.logger.exception("Claude API error")
-        return jsonify(error=f"Błąd API Claude: {exc}"), 502
+    except errors.APIError as exc:
+        # Błędy od Google Gemini
+        if exc.code in (401, 403):
+            return jsonify(error="Błąd uwierzytelniania API Gemini — sprawdź GEMINI_API_KEY"), 502
+        elif exc.code == 429:
+            return jsonify(error="Przekroczono limit zapytań API Gemini — spróbuj ponownie za chwilę"), 429
+        else:
+            current_app.logger.exception("Gemini API error")
+            return jsonify(error=f"Błąd API Gemini: {exc.message}"), 502
+    except Exception as exc:
+        current_app.logger.exception("Unexpected error in chat endpoint")
+        return jsonify(error=f"Wystąpił nieoczekiwany błąd: {str(exc)}"), 500
 
     return jsonify(reply=reply)

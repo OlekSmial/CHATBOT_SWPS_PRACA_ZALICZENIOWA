@@ -1,17 +1,14 @@
-"""Cienka warstwa pośrednia nad API Anthropic Claude dla endpointu czatu."""
+"""Cienka warstwa pośrednia nad API Google Gemini dla endpointu czatu."""
 
 import os
-
-import anthropic
+from google import genai
+from google.genai import types
 
 from app.knowledge import MAIN_KNOWLEDGE
 from app.repository import search_as_text
 
-MODEL = "claude-opus-4-8"
-MAX_TOKENS = 2048
-# Zabezpieczenie przed nieskończoną pętlą wywołań narzędzia.
-MAX_TOOL_ITERS = 4
-
+# Zmiana na darmowy, potężny model od Google (Gemini Pro)
+MODEL = "gemini-2.5-pro"
 
 def _env_flag(name: str, default: bool = True) -> bool:
     """Czyta flagę typu prawda/fałsz ze zmiennej środowiskowej."""
@@ -21,9 +18,7 @@ def _env_flag(name: str, default: bool = True) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on", "tak")
 
 
-# Włącznik RAG: gdy False, wyszukiwanie w repozytorium SWPS jest wyłączone —
-# narzędzie nie jest przekazywane modelowi, a prompt o nim nie wspomina.
-# Sterowane zmienną RAG_ENABLED w pliku .env (domyślnie włączone).
+# Włącznik RAG
 RAG_ENABLED = _env_flag("RAG_ENABLED", True)
 
 # Część wspólna instrukcji (niezależna od RAG).
@@ -36,7 +31,6 @@ _INSTRUCTIONS_BASE = (
     "czy opisywania swojego procesu myślowego. Jeśli masz dostęp do bazy wiedzy poniżej, korzystaj z niej."
 )
 
-# Dodatek instrukcji aktywny tylko, gdy RAG jest włączony.
 _INSTRUCTIONS_RAG = (
     "Jeśli użytkownik pyta o badania, publikacje, artykuły lub naukowców z SWPS, "
     "ZAWSZE najpierw wywołaj narzędzie `szukaj_w_repozytorium`. Po otrzymaniu wyników "
@@ -53,122 +47,74 @@ _INSTRUCTIONS_TAIL = (
 
 _INSTRUCTIONS = _INSTRUCTIONS_BASE + (_INSTRUCTIONS_RAG if RAG_ENABLED else "") + _INSTRUCTIONS_TAIL
 
-# Narzędzie udostępniane modelowi: wyszukiwanie w repozytorium SWPS na żądanie.
-# Stabilne między zapytaniami, więc nie psuje prompt cache.
-_TOOLS = [
-    {
-        "name": "szukaj_w_repozytorium",
-        "description": (
-            "Przeszukuje repozytorium naukowe SWPS (DSpace) i zwraca pasujące "
-            "publikacje: tytuł, autorów, rok, słowa kluczowe, abstrakt i link. "
-            "Wywołaj, gdy pytanie dotyczy publikacji, badań, autorów lub tematów "
-            "naukowych SWPS — zanim udzielisz odpowiedzi."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "zapytanie": {
-                    "type": "string",
-                    "description": "Słowa kluczowe do wyszukania (temat, autor, tytuł).",
-                }
-            },
-            "required": ["zapytanie"],
-        },
-    }
-]
 
-
-def _build_system_prompt() -> list[dict]:
-    """Instrukcje + główna baza wiedzy jako stabilny, buforowany blok promptu.
-
-    Treść jest identyczna bajt po bajcie między zapytaniami, dzięki czemu
-    prefiks może być buforowany (prompt caching). Wiedza szczegółowa nie jest
-    tu wstawiana — model doczytuje ją na żądanie narzędziem wyszukiwania.
-    """
+def _build_system_instruction() -> str:
+    """Buduje główny blok instrukcji (System Prompt)."""
     text = _INSTRUCTIONS
     if MAIN_KNOWLEDGE:
         text += f"\n\n# Baza wiedzy\n\n{MAIN_KNOWLEDGE}"
-    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+    return text
+
+SYSTEM_INSTRUCTION = _build_system_instruction()
+
+# Inicjalizacja klienta Google (Czyta GEMINI_API_KEY ze środowiska)
+_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
-SYSTEM_PROMPT = _build_system_prompt()
-
-# Jeden współdzielony klient dla wszystkich zapytań. Czyta ANTHROPIC_API_KEY ze środowiska.
-_client = anthropic.Anthropic()
+# Narzędzie udostępniane modelowi (Gemini potrafi korzystać z funkcji Pythona bezpośrednio!)
+def szukaj_w_repozytorium(zapytanie: str) -> str:
+    """Przeszukuje repozytorium naukowe SWPS (DSpace) i zwraca pasujące publikacje: tytuł, autorów, rok, słowa kluczowe, abstrakt i link.
+    Wywołaj, gdy pytanie dotyczy publikacji, badań, autorów lub tematów naukowych SWPS — zanim udzielisz odpowiedzi."""
+    return search_as_text(zapytanie)
 
 
 def generate_reply(message: str, history: list[dict] | None = None) -> str:
-    """Wysyła rozmowę do Claude i zwraca tekst odpowiedzi asystenta.
-
-    Obsługuje pętlę wywołań narzędzia: jeśli model poprosi o wyszukanie w
-    repozytorium, wykonujemy je i zwracamy wynik, aż model udzieli ostatecznej
-    odpowiedzi. Gdy RAG jest wyłączony (RAG_ENABLED=False), pomijamy narzędzie
-    i wykonujemy zwykłe pojedyncze zapytanie. `history` to opcjonalna lista
-    wcześniejszych tur jako słowniki {"role", "content"} (role "user" / "assistant").
-    """
-    messages = _build_messages(message, history)
-
-    # RAG wyłączony — zwykły czat bez narzędzia wyszukiwania.
-    if not RAG_ENABLED:
-        response = _client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM_PROMPT, messages=messages
-        )
-        return _text(response)
-
-    for _ in range(MAX_TOOL_ITERS):
-        response = _client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-            tools=_TOOLS,
-        )
-
-        if response.stop_reason != "tool_use":
-            return _text(response)
-
-        # Wykonaj żądane wyszukiwania i dołącz wyniki jako tool_result.
-        messages.append({"role": "assistant", "content": response.content})
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "szukaj_w_repozytorium":
-                query = (block.input or {}).get("zapytanie", "")
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": search_as_text(query),
-                    }
-                )
-        messages.append({"role": "user", "content": tool_results})
-
-    # Limit iteracji wyczerpany — wymuś odpowiedź końcową bez narzędzi.
-    final = _client.messages.create(
-        model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM_PROMPT, messages=messages
+    """Wysyła rozmowę do Gemini i zwraca tekst odpowiedzi asystenta."""
+    
+    # 1. Konfiguracja modelu
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        temperature=0.7,
     )
-    return _text(final)
+    
+    # Jeśli RAG włączony, dajemy modelowi dostęp do narzędzia wyszukiwania w bazie SWPS
+    if RAG_ENABLED:
+        config.tools = [szukaj_w_repozytorium]
+
+    # 2. Przygotowanie historii
+    messages = _build_history(history)
+
+    # 3. Utworzenie sesji czatu. Gemini automatycznie wykona narzędzia w tle, jeśli model o to poprosi!
+    chat = _client.chats.create(
+        model=MODEL,
+        config=config,
+        history=messages
+    )
+
+    # 4. Wysłanie wiadomości i pobranie odpowiedzi
+    response = chat.send_message(message)
+    return response.text
 
 
-def _text(response) -> str:
-    """Skleja tekstowe bloki odpowiedzi w jeden ciąg."""
-    return "".join(block.text for block in response.content if block.type == "text")
-
-
-def _build_messages(message: str, history: list[dict] | None) -> list[dict]:
-    """Normalizuje historię do poprawnej tablicy wiadomości Anthropic.
-
-    Pomija wszystko, co nie jest turą user/assistant, oraz usuwa początkowe
-    tury asystenta (pierwsza wiadomość musi pochodzić od użytkownika).
-    """
-    messages: list[dict] = []
+def _build_history(history: list[dict] | None) -> list[types.Content]:
+    """Normalizuje historię do poprawnej tablicy wiadomości dla formatu Gemini."""
+    contents = []
     for turn in history or []:
         role = turn.get("role")
         content = turn.get("content")
+        
         if role not in ("user", "assistant") or not isinstance(content, str):
             continue
-        if not messages and role != "user":
-            continue  # pomiń początkowe tury asystenta (np. wstępne powitanie)
-        messages.append({"role": role, "content": content})
+            
+        # Mapowanie ról na format Gemini (użytkownik = 'user', asystent = 'model')
+        g_role = "user" if role == "user" else "model"
+        
+        # Ignorujemy pierwszą wiadomość, jeśli pochodzi od modelu (wymagane przez API)
+        if not contents and g_role != "user":
+            continue
+            
+        contents.append(
+            types.Content(role=g_role, parts=[types.Part.from_text(text=content)])
+        )
 
-    messages.append({"role": "user", "content": message})
-    return messages
+    return contents
