@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 type Role = "user" | "bot";
 
@@ -13,7 +13,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
 
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([
-    { role: "bot", text: "Cześć! Zapytaj mnie o dorobek naukowy SWPS." },
+    { role: "bot", text: "Cześć! Jestem Asystentem Laika. Pytaj o trudne badania z SWPS, a ja przełożę to z naukowego na nasze!" },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -71,7 +71,7 @@ export default function Chat() {
           style={{ width: 10, height: 10 }}
           aria-hidden
         />
-        <strong>Chatbot</strong>
+        <strong>Asystent Laika</strong>
       </div>
 
       <div
@@ -124,7 +124,7 @@ export default function Chat() {
           <input
             type="text"
             className="form-control"
-            placeholder="Napisz wiadomość…"
+            placeholder="O jakie badanie lub pojęcie chcesz zapytać?..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
             disabled={loading}
