@@ -1,14 +1,18 @@
 """Cienka warstwa pośrednia nad API Google Gemini dla endpointu czatu."""
 
 import os
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+
+# Wczytanie ukrytego klucza z pliku .env
+load_dotenv()
 
 from app.knowledge import MAIN_KNOWLEDGE
 from app.repository import search_as_text
 
 # Zmiana na darmowy, potężny model od Google (Gemini Pro)
-MODEL = "gemini-2.5-pro"
+MODEL = "gemini-3.5-flash"
 
 def _env_flag(name: str, default: bool = True) -> bool:
     """Czyta flagę typu prawda/fałsz ze zmiennej środowiskowej."""

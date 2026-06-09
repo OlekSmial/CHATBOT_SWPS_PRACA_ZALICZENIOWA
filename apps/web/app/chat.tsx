@@ -27,7 +27,7 @@ export default function Chat() {
     });
   }, [messages, loading]);
 
-  async function sendMessage(e: React.FormEvent) {
+  async function sendMessage(e: any) {
     e.preventDefault();
     const text = input.trim();
     if (!text || loading) return;
