@@ -5,7 +5,8 @@ import os
 import anthropic
 
 from app.knowledge import MAIN_KNOWLEDGE
-from app.repository import search_as_text
+from app.repository import search_as_text as swps_search
+from app.openalex import search_as_text as openalex_search
 
 MODEL = "claude-opus-4-8"
 MAX_TOKENS = 2048
@@ -39,11 +40,13 @@ _INSTRUCTIONS_BASE = (
 # Dodatek instrukcji aktywny tylko, gdy RAG jest włączony.
 _INSTRUCTIONS_RAG = (
     "Jeśli użytkownik pyta o badania, publikacje, artykuły lub naukowców z SWPS, "
-    "ZAWSZE najpierw wywołaj narzędzie `szukaj_w_repozytorium`. Po otrzymaniu wyników "
-    "NIE CYTUJ dosłownie suchych abstraktów. Zamiast tego opowiedz o znalezionych badaniach "
-    "własnymi, prostymi słowami – tak, jakbyś opowiadał o nich znajomemu przy kawie. "
-    "Wyjaśnij, co z tych badań wynika dla przeciętnego człowieka. Na koniec swojej wypowiedzi "
-    "zawsze podaj linki do źródeł, żeby użytkownik mógł sprawdzić szczegóły."
+    "ZAWSZE najpierw wywołaj narzędzie `szukaj_w_repozytorium`. "
+    "Jeśli pytanie dotyczy tematów spoza SWPS lub repozytorium nie zwróciło wyników, "
+    "wywołaj narzędzie `szukaj_w_openalex`, które przeszukuje globalną bazę publikacji naukowych. "
+    "Po otrzymaniu wyników NIE CYTUJ dosłownie suchych abstraktów. Zamiast tego opowiedz "
+    "o znalezionych badaniach własnymi, prostymi słowami – tak, jakbyś opowiadał o nich "
+    "znajomemu przy kawie. Wyjaśnij, co z tych badań wynika dla przeciętnego człowieka. "
+    "Na koniec swojej wypowiedzi zawsze podaj linki do źródeł, żeby użytkownik mógł sprawdzić szczegóły."
 )
 
 _INSTRUCTIONS_TAIL = (
@@ -53,8 +56,8 @@ _INSTRUCTIONS_TAIL = (
 
 _INSTRUCTIONS = _INSTRUCTIONS_BASE + (_INSTRUCTIONS_RAG if RAG_ENABLED else "") + _INSTRUCTIONS_TAIL
 
-# Narzędzie udostępniane modelowi: wyszukiwanie w repozytorium SWPS na żądanie.
-# Stabilne między zapytaniami, więc nie psuje prompt cache.
+# Narzędzia udostępniane modelowi: wyszukiwanie w SWPS i OpenAlex na żądanie.
+# Stabilne między zapytaniami, więc nie psują prompt cache.
 _TOOLS = [
     {
         "name": "szukaj_w_repozytorium",
@@ -74,7 +77,26 @@ _TOOLS = [
             },
             "required": ["zapytanie"],
         },
-    }
+    },
+    {
+        "name": "szukaj_w_openalex",
+        "description": (
+            "Przeszukuje globalną bazę OpenAlex zawierającą setki milionów publikacji "
+            "naukowych z całego świata. Zwraca tytuł, autorów, rok, abstrakt i link. "
+            "Wywołaj gdy pytanie dotyczy tematów spoza SWPS, ogólnych zagadnień naukowych "
+            "lub gdy repozytorium SWPS nie zwróciło wyników."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "zapytanie": {
+                    "type": "string",
+                    "description": "Słowa kluczowe do wyszukania po polsku lub angielsku.",
+                }
+            },
+            "required": ["zapytanie"],
+        },
+    },
 ]
 
 
@@ -101,14 +123,14 @@ def generate_reply(message: str, history: list[dict] | None = None) -> str:
     """Wysyła rozmowę do Claude i zwraca tekst odpowiedzi asystenta.
 
     Obsługuje pętlę wywołań narzędzia: jeśli model poprosi o wyszukanie w
-    repozytorium, wykonujemy je i zwracamy wynik, aż model udzieli ostatecznej
-    odpowiedzi. Gdy RAG jest wyłączony (RAG_ENABLED=False), pomijamy narzędzie
-    i wykonujemy zwykłe pojedyncze zapytanie. `history` to opcjonalna lista
-    wcześniejszych tur jako słowniki {"role", "content"} (role "user" / "assistant").
+    repozytorium lub OpenAlex, wykonujemy je i zwracamy wynik, aż model udzieli
+    ostatecznej odpowiedzi. Gdy RAG jest wyłączony (RAG_ENABLED=False), pomijamy
+    narzędzia i wykonujemy zwykłe pojedyncze zapytanie. `history` to opcjonalna
+    lista wcześniejszych tur jako słowniki {"role", "content"}.
     """
     messages = _build_messages(message, history)
 
-    # RAG wyłączony — zwykły czat bez narzędzia wyszukiwania.
+    # RAG wyłączony — zwykły czat bez narzędzi wyszukiwania.
     if not RAG_ENABLED:
         response = _client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM_PROMPT, messages=messages
@@ -131,15 +153,20 @@ def generate_reply(message: str, history: list[dict] | None = None) -> str:
         messages.append({"role": "assistant", "content": response.content})
         tool_results = []
         for block in response.content:
-            if block.type == "tool_use" and block.name == "szukaj_w_repozytorium":
-                query = (block.input or {}).get("zapytanie", "")
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": search_as_text(query),
-                    }
-                )
+            if block.type != "tool_use":
+                continue
+            query = (block.input or {}).get("zapytanie", "")
+            if block.name == "szukaj_w_repozytorium":
+                content = swps_search(query)
+            elif block.name == "szukaj_w_openalex":
+                content = openalex_search(query)
+            else:
+                continue
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": content,
+            })
         messages.append({"role": "user", "content": tool_results})
 
     # Limit iteracji wyczerpany — wymuś odpowiedź końcową bez narzędzi.
