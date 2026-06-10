@@ -1,13 +1,12 @@
-"""Fabryka aplikacji Flask dla API chatbota."""
-
-import os
-
-from dotenv import load_dotenv
-from flask import Flask
 from flask_cors import CORS
+
+from flask import Flask
+from dotenv import load_dotenv 
 
 from app.routes.chat import chat_bp
 from app.routes.health import health_bp
+from app.openalex import openalex_bp
+import os
 
 
 def create_app() -> Flask:
@@ -22,9 +21,6 @@ def create_app() -> Flask:
 
     app.register_blueprint(health_bp)
     app.register_blueprint(chat_bp)
+    app.register_blueprint(openalex_bp, url_prefix='/api/openalex')
 
     return app
-
-
-# Umożliwia `flask --app app run` wykrycie aplikacji.
-app = create_app()
